@@ -2,22 +2,53 @@ import express from "express";
 import mysql from "mysql2";
 import cors from "cors";
 import bcrypt from "bcrypt";
+import session from "express-session";
+import dotenv from "dotenv";
+import MySQLStoreFactory from "express-mysql-session";
+import crypto from "crypto";
+import nodemailer from "nodemailer";
 
 const app = express();
 
+dotenv.config();
+
 app.use(
   cors({
-    origin: "*",
+    origin: "http://localhost:5173",
+    credentials: true,
   })
 );
 
 app.use(express.json());
 
+const MySQLStore = MySQLStoreFactory(session);
+
+const sessionStore = new MySQLStore({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+});
+
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    store: sessionStore,
+    cookie: {
+      httpOnly: true,
+      secure: false,
+      maxAge: 24 * 60 * 60 * 1000,
+    },
+  })
+);
+
 const db = mysql.createConnection({
-  host: "localhost",
-  user: "",
-  password: "",
-  database: "",
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
 });
 
 app.post("/signup", async function (req, res) {
@@ -26,10 +57,11 @@ app.post("/signup", async function (req, res) {
     const hashedPassword = await bcrypt.hash(newUser.password, 10);
 
     db.query(
-      `INSERT INTO users (user_first_name, user_last_name, email, password) VALUES(?, ?, ?, ?)`,
+      `INSERT INTO users (user_first_name, user_last_name, gender, email, password) VALUES(?, ?, ?, ?,?)`,
       [
         newUser.user_first_name,
         newUser.user_last_name,
+        newUser.gender,
         newUser.email,
         hashedPassword,
       ],
@@ -37,21 +69,57 @@ app.post("/signup", async function (req, res) {
         if (error) {
           console.log(error);
           if (error.errno === 1062) {
-            res
-              .status(409)
-              .json({
-                errorno: error.errno,
-                message: "Account with this email already exists!",
-              });
+            res.status(409).json({
+              errorno: error.errno,
+              message: "Account with this email already exists!",
+            });
           } else {
             res
               .status(404)
               .json({ errorno: error.errno, message: error.message });
           }
         } else {
-          res
-            .status(200)
-            .json({ message: "Account was successfully created!" });
+          const userId = result.insertId;
+
+          const token = crypto.randomBytes(32).toString("hex");
+
+          const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+          db.query(
+            `INSERT INTO action_tokens (user_id, token, type, expires_at) VALUES (?, ?, 'verify_email', ?)`,
+            [userId, token, expiresAt],
+            async (err) => {
+              if (err) {
+                console.log(err);
+                return res.status(500).json({ message: "Token error" });
+              }
+
+              const transporter = nodemailer.createTransport({
+                service: "gmail",
+                auth: {
+                  user: process.env.EMAIL_USER,
+                  pass: process.env.EMAIL_PASS,
+                },
+              });
+
+              const verifyLink = `http://localhost:5173/verify-email?token=${token}`;
+
+              await transporter.sendMail({
+                from: process.env.EMAIL_USER,
+                to: newUser.email,
+                subject: "Please confirm your email",
+                html: `
+                  <h2>Thank you for registration in DuckTrack!</h2>
+                  <p>Click the link below to confirm your email and complete registration:</p>
+                  <a href="${verifyLink}">${verifyLink}</a>
+                `,
+              });
+
+              res.status(200).json({
+                message: "Account created! Please check your email to verify.",
+              });
+            }
+          );
         }
       }
     );
@@ -59,6 +127,32 @@ app.post("/signup", async function (req, res) {
     console.log(error);
     res.status(500).json({ error: "Error" });
   }
+});
+
+app.post("/verify-email", (req, res) => {
+  const { token } = req.body;
+
+  if (!token) {
+    return res.status(400).json({ message: "Missing token" });
+  }
+
+  db.query(
+    `SELECT * FROM action_tokens WHERE token = ? AND type = 'verify_email' AND expires_at > NOW()`,
+    [token],
+    (err, results) => {
+      if (err || results.length === 0) {
+        return res.status(400).json({ message: "Invalid or expired token" });
+      }
+
+      const userId = results[0].user_id;
+
+      db.query(`UPDATE users SET is_verified = 1 WHERE user_id = ?`, [userId]);
+
+      db.query(`DELETE FROM action_tokens WHERE token = ?`, [token]);
+
+      res.status(200).json({ message: "Email verified successfully!" });
+    }
+  );
 });
 
 app.post("/login", async (req, res) => {
@@ -92,16 +186,34 @@ app.post("/login", async (req, res) => {
           .json({ found: false, message: "Wrong credentials!" });
       }
 
+      req.session.user = {
+        user_id: user.user_id,
+        user_first_name: user.user_first_name,
+        user_last_name: user.user_last_name,
+        gender: user.gender,
+      };
+
       res.status(200).json({
-        found: true,
-        data: {
-          user_id: user.user_id,
-          user_first_name: user.user_first_name,
-          user_last_name: user.user_last_name,
-        },
+        message: "Logged in",
+        user: req.session.user,
       });
     }
   );
+});
+
+app.get("/me", (req, res) => {
+  if (req.session.user) {
+    res.json({ loggedIn: true, user: req.session.user });
+  } else {
+    res.json({ loggedIn: false });
+  }
+});
+
+app.post("/logout", (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie("connect.sid");
+    res.send({ message: "Logged out" });
+  });
 });
 
 app.post("/new-application", function (req, res) {
@@ -121,7 +233,7 @@ app.post("/new-application", function (req, res) {
       newApplication.user_id,
       newApplication.work_mode,
       newApplication.status,
-      newApplication.notes
+      newApplication.notes,
     ],
     (error, result, fields) => {
       if (error) {
@@ -145,9 +257,9 @@ app.post("/new-application", function (req, res) {
 app.get("/my-applications", (req, res) => {
   const user_id = req.query.user_id;
   const search = req.query.search;
-  const sort = req.query.sort || "created_at"; 
-  const order = req.query.order === "asc" ? "ASC" : "DESC"; 
-  const status = req.query.status; 
+  const sort = req.query.sort || "created_at";
+  const order = req.query.order === "asc" ? "ASC" : "DESC";
+  const status = req.query.status;
 
   if (!user_id) {
     return res.status(400).json({ message: "User ID is required" });
@@ -156,14 +268,12 @@ app.get("/my-applications", (req, res) => {
   let query = `SELECT * FROM job_applications WHERE users_user_id = ?`;
   const params = [user_id];
 
-
   if (search) {
     let searchPattern = `%${search}%`;
     query += ` AND (position_name LIKE ? OR employer_name LIKE ? OR status LIKE ?)`;
     params.push(searchPattern, searchPattern, searchPattern);
   }
 
- 
   if (status) {
     query += ` AND status = ?`;
     params.push(status);
@@ -172,7 +282,7 @@ app.get("/my-applications", (req, res) => {
   if (["position_name", "employer_name", "created_at"].includes(sort)) {
     query += ` ORDER BY ${sort} ${order}`;
   } else {
-    query += ` ORDER BY created_at DESC`; 
+    query += ` ORDER BY created_at DESC`;
   }
 
   db.query(query, params, (error, results) => {
@@ -229,47 +339,43 @@ app.patch("/my-applications/:id", function (req, res) {
           res.status(500).json({ errno: error.errno, message: error.message });
         }
       } else {
-        res
-          .status(200)
-          .json({
-            message: "Application updated!",
-            affectedRows: result.affectedRows,
-          });
+        res.status(200).json({
+          message: "Application updated!",
+          affectedRows: result.affectedRows,
+        });
       }
     }
   );
 });
 
 app.get("/get-user/:id", (req, res) => {
-  
   const userId = req.params.id;
   const query = `SELECT * FROM users WHERE user_id = ${userId}`;
 
   db.query(query, (err, results) => {
     if (err) {
       return res.status(500).send("Error fetching user data");
-    } 
-    
+    }
+
     res.json(results[0]);
   });
 });
 
-
-
 app.patch("/update-profile/:id", function (req, res) {
   const userId = req.params.user_id;
   let updatedProfile = req.body;
-    db.query(
-      `UPDATE users 
+  db.query(
+    `UPDATE users 
        SET user_first_name = ?, user_last_name = ?, email = ?, employment_type = ?,
        photo = ?,
        WHERE user_id= ?`,
-      [  updatedProfile.user_first_name,
-         updatedProfile.user_last_name,
-         updatedProfile.email, 
-         updatedProfile.photo,
-         userId,
-      ],
+    [
+      updatedProfile.user_first_name,
+      updatedProfile.user_last_name,
+      updatedProfile.email,
+      updatedProfile.photo,
+      userId,
+    ],
     (error, result, fields) => {
       if (error) {
         console.log(error);
@@ -289,26 +395,21 @@ app.patch("/update-profile/:id", function (req, res) {
   );
 });
 
-app.delete('/my-applications/:id', function(req,res) {
-  let applicationId=Number(req.params.id);
- 
-  if (typeof applicationId !== 'number') {
-      res.status(404).json({ message: "Inexistent application" });
-  } else {
+app.delete("/my-applications/:id", function (req, res) {
+  let applicationId = Number(req.params.id);
 
-      db.query(`DELETE FROM job_applications WHERE application_id = ?`, [applicationId], (error, result, fields) => {
-          res.status(200).json({ message: "Application deleted" });
-      });
+  if (typeof applicationId !== "number") {
+    res.status(404).json({ message: "Inexistent application" });
+  } else {
+    db.query(
+      `DELETE FROM job_applications WHERE application_id = ?`,
+      [applicationId],
+      (error, result, fields) => {
+        res.status(200).json({ message: "Application deleted" });
+      }
+    );
   }
 });
-
-
-
-
-
-
-
-
 
 app.use((req, res, next) => {
   res.status(404).send("Wrong route!");
