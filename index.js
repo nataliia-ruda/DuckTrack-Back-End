@@ -361,38 +361,62 @@ app.get("/get-user/:id", (req, res) => {
   });
 });
 
-app.patch("/update-profile/:id", function (req, res) {
-  const userId = req.params.user_id;
-  let updatedProfile = req.body;
-  db.query(
-    `UPDATE users 
-       SET user_first_name = ?, user_last_name = ?, email = ?, employment_type = ?,
-       photo = ?,
-       WHERE user_id= ?`,
-    [
-      updatedProfile.user_first_name,
-      updatedProfile.user_last_name,
-      updatedProfile.email,
-      updatedProfile.photo,
-      userId,
-    ],
-    (error, result, fields) => {
-      if (error) {
-        console.log(error);
-        if (error.errno === 1062) {
-          res
-            .status(409)
-            .json({ errorno: error.errno, message: "Repeated entry!" });
-        } else {
-          res
-            .status(404)
-            .json({ errorno: error.errno, message: error.message });
+app.patch("/update-profile", async (req, res) => {
+  const { user_id, firstName, lastName, gender, currentPassword, newPassword } =
+    req.body;
+
+  try {
+    db.query(
+      `UPDATE users SET user_first_name = ?, user_last_name = ?, gender = ? WHERE user_id = ?`,
+      [firstName, lastName, gender, user_id]
+    );
+
+    if (currentPassword && newPassword) {
+      db.query(
+        `SELECT password FROM users WHERE user_id = ?`,
+        [user_id],
+        async (err, result) => {
+          if (err || result.length === 0) {
+            return res.status(404).json({ message: "User not found." });
+          }
+
+          const storedHash = result[0].password;
+
+          const isMatch = await bcrypt.compare(currentPassword, storedHash);
+
+          if (!isMatch) {
+            return res
+              .status(403)
+              .json({ message: "Current password is incorrect." });
+          }
+
+          const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+          db.query(
+            `UPDATE users SET password = ? WHERE user_id = ?`,
+            [hashedNewPassword, user_id],
+            (err2) => {
+              if (err2) {
+                console.error(err2);
+                return res
+                  .status(500)
+                  .json({ message: "Error updating password." });
+              }
+
+              return res
+                .status(200)
+                .json({ message: "Profile and password updated." });
+            }
+          );
         }
-      } else {
-        res.status(200).json({ message: "New Application created!" });
-      }
+      );
+    } else {
+      return res.status(200).json({ message: "Profile updated successfully." });
     }
-  );
+  } catch (error) {
+    console.error("Error updating profile:", error);
+    res.status(500).json({ message: "Server error." });
+  }
 });
 
 app.delete("/my-applications/:id", function (req, res) {
