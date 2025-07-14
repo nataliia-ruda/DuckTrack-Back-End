@@ -7,6 +7,7 @@ import dotenv from "dotenv";
 import MySQLStoreFactory from "express-mysql-session";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
+import cron from "node-cron";
 
 const app = express();
 
@@ -49,6 +50,33 @@ const db = mysql.createConnection({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+});
+
+const markGhostedApplications = () => {
+  const sql = `
+    UPDATE job_applications
+    JOIN users ON job_applications.users_user_id = users.user_id
+    SET job_applications.status = 'ghosted'
+    WHERE 
+      job_applications.status = 'applied'
+      AND users.auto_ghost_enabled = 1
+      AND DATEDIFF(NOW(), job_applications.updated_at) > 21;
+  `;
+
+  db.query(sql, (err, result) => {
+    if (err) {
+      console.error("Error updating status applications:", err);
+    } else {
+      console.log(
+        `Successfully changed status of ${result.affectedRows} applications.`
+      );
+    }
+  });
+};
+
+cron.schedule("0 3 * * *", () => {
+  console.log("Running applications status check at 3:00 AM...");
+  markGhostedApplications();
 });
 
 app.post("/signup", async function (req, res) {
@@ -283,6 +311,109 @@ app.get("/me", (req, res) => {
   }
 });
 
+app.post("/forgot-password", async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ message: "Email is required" });
+  }
+
+  db.query(
+    `SELECT * FROM users WHERE email = ?`,
+    [email],
+    async (err, results) => {
+      if (err) {
+        console.error("DB error:", err);
+        return res.status(500).json({ message: "Server error" });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({
+          message: "We didn't find your account. Please, check email again.",
+        });
+      }
+
+      const user = results[0];
+      const token = crypto.randomBytes(32).toString("hex");
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+      db.query(
+        `INSERT INTO action_tokens (user_id, token, type, expires_at) VALUES (?, ?, 'reset_password', ?)`,
+        [user.user_id, token, expiresAt],
+        async (err2) => {
+          if (err2) {
+            console.error("Token DB error:", err2);
+            return res.status(500).json({ message: "Server error" });
+          }
+
+          const transporter = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+              user: process.env.EMAIL_USER,
+              pass: process.env.EMAIL_PASS,
+            },
+          });
+
+          const resetLink = `http://localhost:5173/reset-password?token=${token}`;
+
+          await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: "DuckTrack - Password Reset",
+            html: `
+            <h2>Reset Your Password</h2>
+            <p>Click below to set a new password:</p>
+            <a href="${resetLink}">${resetLink}</a>
+            <p>If you didn't request this, you can ignore this email.</p>
+          `,
+          });
+
+          return res
+            .status(200)
+            .json({ message: "Reset email sent. Check your inbox." });
+        }
+      );
+    }
+  );
+});
+
+app.post("/reset-password", async (req, res) => {
+  const { token, password } = req.body;
+
+  if (!token || !password) {
+    return res.status(400).json({ message: "Token and password are required" });
+  }
+
+  db.query(
+    `SELECT * FROM action_tokens WHERE token = ? AND type = 'reset_password' AND expires_at > NOW()`,
+    [token],
+    async (err, results) => {
+      if (err || results.length === 0) {
+        return res.status(400).json({ message: "Invalid or expired token" });
+      }
+
+      const userId = results[0].user_id;
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      db.query(
+        `UPDATE users SET password = ? WHERE user_id = ?`,
+        [hashedPassword, userId],
+        (err2) => {
+          if (err2) {
+            console.error("Password update error:", err2);
+            return res.status(500).json({ message: "Server error" });
+          }
+
+          db.query(`DELETE FROM action_tokens WHERE token = ?`, [token]);
+
+          res
+            .status(200)
+            .json({ message: "Password has been reset successfully!" });
+        }
+      );
+    }
+  );
+});
+
 app.post("/logout", (req, res) => {
   req.session.destroy(() => {
     res.clearCookie("connect.sid");
@@ -424,69 +555,92 @@ app.patch("/my-applications/:id", function (req, res) {
 
 app.get("/get-user/:id", (req, res) => {
   const userId = req.params.id;
-  const query = `SELECT * FROM users WHERE user_id = ${userId}`;
 
-  db.query(query, (err, results) => {
-    if (err) {
-      return res.status(500).send("Error fetching user data");
+  db.query(
+    `SELECT user_first_name, user_last_name, email, gender, auto_ghost_enabled FROM users WHERE user_id = ?`,
+    [userId],
+    (err, results) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ message: "Server error." });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({ message: "User not found." });
+      }
+
+      res.status(200).json(results[0]);
     }
-
-    res.json(results[0]);
-  });
+  );
 });
 
 app.patch("/update-profile", async (req, res) => {
-  const { user_id, firstName, lastName, gender, currentPassword, newPassword } =
-    req.body;
+  const {
+    user_id,
+    firstName,
+    lastName,
+    gender,
+    autoGhostEnabled,
+    currentPassword,
+    newPassword,
+  } = req.body;
 
   try {
     db.query(
-      `UPDATE users SET user_first_name = ?, user_last_name = ?, gender = ? WHERE user_id = ?`,
-      [firstName, lastName, gender, user_id]
-    );
+      `UPDATE users SET user_first_name = ?, user_last_name = ?, gender = ?, auto_ghost_enabled = ? WHERE user_id = ?`,
+      [firstName, lastName, gender, autoGhostEnabled ? 1 : 0, user_id],
+      (err) => {
+        if (err) {
+          console.error(err);
+          return res.status(500).json({ message: "Error updating profile." });
+        }
 
-    if (currentPassword && newPassword) {
-      db.query(
-        `SELECT password FROM users WHERE user_id = ?`,
-        [user_id],
-        async (err, result) => {
-          if (err || result.length === 0) {
-            return res.status(404).json({ message: "User not found." });
-          }
-
-          const storedHash = result[0].password;
-
-          const isMatch = await bcrypt.compare(currentPassword, storedHash);
-
-          if (!isMatch) {
-            return res
-              .status(403)
-              .json({ message: "Current password is incorrect." });
-          }
-
-          const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-
+        if (currentPassword && newPassword) {
           db.query(
-            `UPDATE users SET password = ? WHERE user_id = ?`,
-            [hashedNewPassword, user_id],
-            (err2) => {
-              if (err2) {
-                console.error(err2);
-                return res
-                  .status(500)
-                  .json({ message: "Error updating password." });
+            `SELECT password FROM users WHERE user_id = ?`,
+            [user_id],
+            async (err2, result) => {
+              if (err2 || result.length === 0) {
+                return res.status(404).json({ message: "User not found." });
               }
 
-              return res
-                .status(200)
-                .json({ message: "Profile and password updated." });
+              const storedHash = result[0].password;
+
+              const isMatch = await bcrypt.compare(currentPassword, storedHash);
+
+              if (!isMatch) {
+                return res
+                  .status(403)
+                  .json({ message: "Current password is incorrect." });
+              }
+
+              const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+              db.query(
+                `UPDATE users SET password = ? WHERE user_id = ?`,
+                [hashedNewPassword, user_id],
+                (err3) => {
+                  if (err3) {
+                    console.error(err3);
+                    return res
+                      .status(500)
+                      .json({ message: "Error updating password." });
+                  }
+
+                  return res
+                    .status(200)
+                    .json({ message: "Profile and password updated." });
+                }
+              );
             }
           );
+        } else {
+          return res
+            .status(200)
+            .json({ message: "Profile updated successfully." });
         }
-      );
-    } else {
-      return res.status(200).json({ message: "Profile updated successfully." });
-    }
+      }
+    );
   } catch (error) {
     console.error("Error updating profile:", error);
     res.status(500).json({ message: "Server error." });
