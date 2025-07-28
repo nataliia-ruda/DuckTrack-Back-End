@@ -74,10 +74,17 @@ const markGhostedApplications = () => {
   });
 };
 
-cron.schedule("0 3 * * *", () => {
-  console.log("Running applications status check at 3:00 AM...");
-  markGhostedApplications();
-});
+cron.schedule(
+  "0 3 * * *",
+  () => {
+    console.log("Running applications status check at 3:00 AM...");
+    markGhostedApplications();
+  },
+  {
+    scheduled: true,
+    timezone: "Europe/Berlin",
+  }
+);
 
 app.post("/signup", async function (req, res) {
   let newUser = req.body;
@@ -502,10 +509,21 @@ app.get("/my-applications", (req, res) => {
 
 app.get("/my-applications/:id", function (req, res) {
   let applicationId = Number(req.params.id);
+
   db.query(
-    `SELECT * FROM job_applications WHERE application_id=${applicationId}`,
-    (error, result, fields) => {
-      res.status(200).json(result[0]);
+    `SELECT * FROM job_applications WHERE application_id = ?`,
+    [applicationId],
+    (error, results) => {
+      if (error) {
+        console.error("Error fetching application:", error);
+        return res.status(500).json({ message: "Server error" });
+      }
+
+      if (!results || results.length === 0) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
+      res.status(200).json(results[0]);
     }
   );
 });
@@ -551,6 +569,115 @@ app.patch("/my-applications/:id", function (req, res) {
       }
     }
   );
+});
+
+app.post("/interviews", (req, res) => {
+  const { application_id, interview_date, location, contact_person, notes } =
+    req.body;
+
+  if (!application_id || !interview_date) {
+    return res
+      .status(400)
+      .json({ message: "Application ID and date are required." });
+  }
+
+  const query = `
+    INSERT INTO interviews 
+    (application_id, interview_date, location, contact_person, notes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+  `;
+
+  db.query(
+    query,
+    [application_id, interview_date, location, contact_person, notes],
+    (err, results) => {
+      if (err) {
+        console.error("Error saving interview:", err);
+        return res.status(500).json({ message: "Failed to save interview." });
+      }
+      res.status(201).json({ message: "Interview saved successfully!" });
+    }
+  );
+});
+
+app.get("/interviews", (req, res) => {
+  const userId = req.session?.user?.user_id;
+
+  if (!userId) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  const query = `
+    SELECT i.*, j.position_name, j.employer_name 
+    FROM interviews i
+    JOIN job_applications j ON i.application_id = j.application_id
+    WHERE j.users_user_id = ?
+    ORDER BY i.interview_date ASC
+  `;
+
+  db.query(query, [userId], (err, results) => {
+    if (err) {
+      console.error("Error fetching interviews:", err);
+      return res.status(500).json({ message: "Failed to fetch interviews." });
+    }
+
+    res.status(200).json({ interviews: results });
+  });
+});
+
+app.patch("/interviews/:id", (req, res) => {
+  const { id } = req.params;
+  const { interview_date, location, contact_person, notes } = req.body;
+
+  const sql = `
+    UPDATE interviews
+    SET interview_date = ?, location = ?, contact_person = ?, notes = ?, updated_at = NOW()
+    WHERE interview_id = ?
+  `;
+
+  db.query(
+    sql,
+    [interview_date, location, contact_person, notes, id],
+    (err, result) => {
+      if (err)
+        return res.status(500).json({ message: "Failed to update interview" });
+      res.status(200).json({ message: "Interview updated!" });
+    }
+  );
+});
+
+app.delete("/interviews/:id", (req, res) => {
+  const { id } = req.params;
+  db.query(`DELETE FROM interviews WHERE interview_id = ?`, [id], (err) => {
+    if (err) return res.status(500).json({ message: "Delete failed" });
+    res.status(200).json({ message: "Interview deleted" });
+  });
+});
+
+app.get("/my-employers", (req, res) => {
+  const user_id = req.session.user?.user_id;
+  if (!user_id) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  const query = `
+    SELECT 
+      MAX(application_id) AS application_id,
+      employer_name
+    FROM job_applications
+    WHERE users_user_id = ?
+    GROUP BY employer_name
+    ORDER BY employer_name ASC
+  `;
+
+  db.query(query, [user_id], (err, results) => {
+    if (err) {
+      console.error("Error fetching employers:", err);
+      return res.status(500).json({ message: "Internal server error" });
+    }
+
+    res.status(200).json({ employers: results });
+  });
 });
 
 app.get("/get-user/:id", (req, res) => {
