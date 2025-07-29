@@ -528,54 +528,34 @@ app.get("/my-applications/:id", function (req, res) {
   );
 });
 
-app.patch("/my-applications/:id", function (req, res) {
-  let applicationId = Number(req.params.id);
-  let updatedApplication = req.body;
-  let dateOfUpdate = new Date();
+app.patch("/interviews/:id", (req, res) => {
+  const { id } = req.params;
+  const { interview_date, location, contact_person, notes, type } = req.body;
+
+  const sql = `
+    UPDATE interviews
+    SET interview_date = ?, location = ?, contact_person = ?, notes = ?, type = ?, updated_at = NOW()
+    WHERE interview_id = ?
+  `;
 
   db.query(
-    `UPDATE job_applications 
-     SET position_name = ?, employer_name = ?, application_date = ?, employment_type = ?, source = ?, job_description = ?, job_link = ?, work_mode = ?, status = ?,updated_at = ?, notes = ?
-     WHERE application_id = ?`,
-    [
-      updatedApplication.position_name,
-      updatedApplication.employer_name,
-      updatedApplication.application_date,
-      updatedApplication.employment_type,
-      updatedApplication.source,
-      updatedApplication.job_description,
-      updatedApplication.job_link,
-      updatedApplication.work_mode,
-      updatedApplication.status,
-      dateOfUpdate,
-      updatedApplication.notes,
-      applicationId,
-    ],
-    (error, result, fields) => {
-      if (error) {
-        console.log(error);
-        if (error.errno === 1062) {
-          res
-            .status(409)
-            .json({ errno: error.errno, message: "Repeated entry!" });
-        } else {
-          res.status(500).json({ errno: error.errno, message: error.message });
-        }
-      } else {
-        res.status(200).json({
-          message: "Application updated!",
-          affectedRows: result.affectedRows,
-        });
-      }
+    sql,
+    [interview_date, location, contact_person, notes, type || null, id],
+    (err, result) => {
+      if (err)
+        return res.status(500).json({ message: "Failed to update interview" });
+      res.status(200).json({ message: "Interview updated!" });
     }
   );
 });
 
 app.post("/interviews", (req, res) => {
-  const { application_id, interview_date, location, contact_person, notes } =
-    req.body;
+  console.log("POST /interviews called");
+  console.log("Received body:", req.body);
 
-  if (!application_id || !interview_date) {
+  const { application_id, date, location, contact, notes, type } = req.body;
+
+  if (!application_id || !date) {
     return res
       .status(400)
       .json({ message: "Application ID and date are required." });
@@ -583,13 +563,13 @@ app.post("/interviews", (req, res) => {
 
   const query = `
     INSERT INTO interviews 
-    (application_id, interview_date, location, contact_person, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+    (application_id, interview_date, location, contact_person, notes, type, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
   `;
 
   db.query(
     query,
-    [application_id, interview_date, location, contact_person, notes],
+    [application_id, date, location, contact, notes, type || null],
     (err, results) => {
       if (err) {
         console.error("Error saving interview:", err);
@@ -679,6 +659,91 @@ app.get("/my-employers", (req, res) => {
     res.status(200).json({ employers: results });
   });
 });
+
+const sendInterviewReminders = () => {
+  const sql = `
+    SELECT i.interview_id, i.application_id, u.email, u.user_first_name, j.position_name, j.employer_name, i.interview_date 
+    FROM interviews i
+    JOIN job_applications j ON i.application_id = j.application_id
+    JOIN users u ON j.users_user_id = u.user_id
+    WHERE DATE(i.interview_date) = CURDATE() + INTERVAL 1 DAY
+      AND i.reminder_sent = 0
+  `;
+
+  db.query(sql, async (err, results) => {
+    if (err) {
+      console.error("Error fetching interviews for reminder:", err);
+      return;
+    }
+
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    for (const row of results) {
+      const formattedDate = new Date(row.interview_date).toLocaleString(
+        "de-DE",
+        {
+          dateStyle: "full",
+          timeStyle: "short",
+        }
+      );
+
+      const mailOptions = {
+        from: process.env.EMAIL_USER,
+        to: row.email,
+        subject: "DuckTrack - Interview Reminder ",
+        html: `
+          <h3>Hello ${row.user_first_name}!</h3>
+          <p>This is a reminder about your upcoming interview:</p>
+          <ul>
+            <li><strong>Position:</strong> ${row.position_name}</li>
+            <li><strong>Employer:</strong> ${row.employer_name}</li>
+            <li><strong>Date & Time:</strong> ${formattedDate}</li>
+          </ul>
+          <p>Don't forget to prepare and may the force of the duck be with you!</p>
+        `,
+      };
+
+      try {
+        await transporter.sendMail(mailOptions);
+        console.log(`Reminder sent to ${row.email}`);
+
+        db.query(
+          `UPDATE interviews SET reminder_sent = 1 WHERE interview_id = ?`,
+          [row.interview_id],
+          (err2) => {
+            if (err2) {
+              console.error("Failed to update reminder_sent:", err2);
+            } else {
+              console.log(
+                `reminder_sent updated for interview ID ${row.interview_id}`
+              );
+            }
+          }
+        );
+      } catch (emailErr) {
+        console.error(`Failed to send reminder to ${row.email}:`, emailErr);
+      }
+    }
+  });
+};
+
+cron.schedule(
+  "0 7 * * *", // every day at 7:00 AM
+  () => {
+    console.log("Running interview reminder check...");
+    sendInterviewReminders();
+  },
+  {
+    scheduled: true,
+    timezone: "Europe/Berlin",
+  }
+);
 
 app.get("/get-user/:id", (req, res) => {
   const userId = req.params.id;
