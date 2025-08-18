@@ -550,9 +550,6 @@ app.patch("/interviews/:id", (req, res) => {
 });
 
 app.post("/interviews", (req, res) => {
-  console.log("POST /interviews called");
-  console.log("Received body:", req.body);
-
   const { application_id, date, location, contact, notes, type } = req.body;
 
   if (!application_id || !date) {
@@ -561,23 +558,57 @@ app.post("/interviews", (req, res) => {
       .json({ message: "Application ID and date are required." });
   }
 
-  const query = `
-    INSERT INTO interviews 
-    (application_id, interview_date, location, contact_person, notes, type, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
-  `;
-
-  db.query(
-    query,
-    [application_id, date, location, contact, notes, type || null],
-    (err, results) => {
-      if (err) {
-        console.error("Error saving interview:", err);
-        return res.status(500).json({ message: "Failed to save interview." });
-      }
-      res.status(201).json({ message: "Interview saved successfully!" });
+  db.beginTransaction((err) => {
+    if (err) {
+      console.error("TX begin error:", err);
+      return res.status(500).json({ message: "Server error" });
     }
-  );
+
+    const insertInterview = `
+      INSERT INTO interviews 
+        (application_id, interview_date, location, contact_person, notes, type, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
+    `;
+
+    db.query(
+      insertInterview,
+      [application_id, date, location, contact, notes, type || null],
+      (insErr, result) => {
+        if (insErr) {
+          console.error("Error saving interview:", insErr);
+          return db.rollback(() =>
+            res.status(500).json({ message: "Failed to save interview." })
+          );
+        }
+
+        const updateApplication = `
+          UPDATE job_applications
+          SET status = 'interviewing', updated_at = NOW()
+          WHERE application_id = ?
+            AND status NOT IN ('rejected','withdrawn','offer')
+        `;
+
+        db.query(updateApplication, [application_id], (updErr) => {
+          if (updErr) {
+            console.error("Error updating application status:", updErr);
+            return db.rollback(() =>
+              res.status(500).json({ message: "Failed to link interview." })
+            );
+          }
+
+          db.commit((commitErr) => {
+            if (commitErr) {
+              console.error("TX commit error:", commitErr);
+              return db.rollback(() =>
+                res.status(500).json({ message: "Server error" })
+              );
+            }
+            res.status(201).json({ message: "Interview saved successfully!" });
+          });
+        });
+      }
+    );
+  });
 });
 
 app.get("/interviews", (req, res) => {
@@ -837,6 +868,66 @@ app.patch("/update-profile", async (req, res) => {
     console.error("Error updating profile:", error);
     res.status(500).json({ message: "Server error." });
   }
+});
+
+app.patch("/my-applications/:id", (req, res) => {
+  const applicationId = Number(req.params.id);
+  const {
+    position_name,
+    employer_name,
+    application_date,
+    employment_type,
+    source,
+    job_description,
+    job_link,
+    work_mode,
+    status,
+    notes,
+  } = req.body;
+
+  const sql = `
+    UPDATE job_applications
+    SET 
+      position_name = ?, 
+      employer_name = ?, 
+      application_date = ?, 
+      employment_type = ?, 
+      source = ?, 
+      job_description = ?, 
+      job_link = ?, 
+      work_mode = ?, 
+      status = ?, 
+      notes = ?, 
+      updated_at = NOW()
+    WHERE application_id = ?
+  `;
+
+  db.query(
+    sql,
+    [
+      position_name,
+      employer_name,
+      application_date,
+      employment_type,
+      source,
+      job_description,
+      job_link,
+      work_mode,
+      status,
+      notes,
+      applicationId,
+    ],
+    (error, result) => {
+      if (error) {
+        console.error("Error updating application:", error);
+        return res
+          .status(500)
+          .json({ message: "Failed to update application" });
+      }
+
+      res.status(200).json({ message: "Application updated successfully!" });
+    }
+  );
 });
 
 app.delete("/my-applications/:id", function (req, res) {
