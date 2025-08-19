@@ -86,8 +86,39 @@ cron.schedule(
   }
 );
 
+function getUserEmailById(userId) {
+  return new Promise((resolve, reject) => {
+    db.query(`SELECT email FROM users WHERE user_id = ?`, [userId], (e, r) => {
+      if (e || r.length === 0) return reject(e || new Error("User not found"));
+      resolve(r[0].email);
+    });
+  });
+}
+
+function makeTransporter() {
+  return nodemailer.createTransport({
+    service: "gmail",
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+  });
+}
+
 app.post("/signup", async function (req, res) {
   let newUser = req.body;
+
+  const pw = newUser?.password ?? "";
+  const strong =
+    pw.length >= 8 &&
+    /[A-Z]/.test(pw) &&
+    /[^\w\s]/.test(pw) &&
+    pw.trim() === pw;
+  if (!strong) {
+    return res.status(400).json({
+      errorno: 0,
+      message:
+        "Password must be at least 8 characters, include an uppercase and a special character, and not start or end with a space.",
+    });
+  }
+
   try {
     const hashedPassword = await bcrypt.hash(newUser.password, 10);
 
@@ -311,11 +342,23 @@ app.post("/resend-verification", (req, res) => {
 });
 
 app.get("/me", (req, res) => {
-  if (req.session.user) {
-    res.json({ loggedIn: true, user: req.session.user });
-  } else {
-    res.json({ loggedIn: false });
-  }
+  const sessUser = req.session.user;
+  if (!sessUser) return res.json({ loggedIn: false });
+
+  db.query(
+    `SELECT user_id FROM users WHERE user_id = ?`,
+    [sessUser.user_id],
+    (e, r) => {
+      if (e || r.length === 0) {
+        req.session.destroy(() => {
+          res.clearCookie("connect.sid");
+          return res.json({ loggedIn: false });
+        });
+      } else {
+        res.json({ loggedIn: true, user: sessUser });
+      }
+    }
+  );
 });
 
 app.post("/forgot-password", async (req, res) => {
@@ -388,6 +431,18 @@ app.post("/reset-password", async (req, res) => {
 
   if (!token || !password) {
     return res.status(400).json({ message: "Token and password are required" });
+  }
+
+  const strong =
+    typeof password === "string" &&
+    password.length >= 8 &&
+    /[A-Z]/.test(password) &&
+    /[^\w\s]/.test(password);
+  if (!strong) {
+    return res.status(400).json({
+      message:
+        "Password must be at least 8 characters and include an uppercase letter and a special character.",
+    });
   }
 
   db.query(
@@ -636,27 +691,6 @@ app.get("/interviews", (req, res) => {
   });
 });
 
-app.patch("/interviews/:id", (req, res) => {
-  const { id } = req.params;
-  const { interview_date, location, contact_person, notes } = req.body;
-
-  const sql = `
-    UPDATE interviews
-    SET interview_date = ?, location = ?, contact_person = ?, notes = ?, updated_at = NOW()
-    WHERE interview_id = ?
-  `;
-
-  db.query(
-    sql,
-    [interview_date, location, contact_person, notes, id],
-    (err, result) => {
-      if (err)
-        return res.status(500).json({ message: "Failed to update interview" });
-      res.status(200).json({ message: "Interview updated!" });
-    }
-  );
-});
-
 app.delete("/interviews/:id", (req, res) => {
   const { id } = req.params;
   db.query(`DELETE FROM interviews WHERE interview_id = ?`, [id], (err) => {
@@ -776,6 +810,18 @@ cron.schedule(
   }
 );
 
+cron.schedule(
+  "0 * * * *", // hourly
+  () => {
+    console.log("Cleaning up expired tokens...");
+    db.query(`DELETE FROM action_tokens WHERE expires_at <= NOW()`);
+  },
+  {
+    scheduled: true,
+    timezone: "Europe/Berlin",
+  }
+);
+
 app.get("/get-user/:id", (req, res) => {
   const userId = req.params.id;
 
@@ -819,6 +865,17 @@ app.patch("/update-profile", async (req, res) => {
         }
 
         if (currentPassword && newPassword) {
+          const strong =
+            typeof newPassword === "string" &&
+            newPassword.length >= 8 &&
+            /[A-Z]/.test(newPassword) &&
+            /[^\w\s]/.test(newPassword);
+          if (!strong) {
+            return res.status(400).json({
+              message:
+                "Password must be at least 8 characters and include an uppercase letter and a special character.",
+            });
+          }
           db.query(
             `SELECT password FROM users WHERE user_id = ?`,
             [user_id],
@@ -944,6 +1001,128 @@ app.delete("/my-applications/:id", function (req, res) {
       }
     );
   }
+});
+
+app.post("/request-delete-account", async (req, res) => {
+  const userId = req.session?.user?.user_id;
+  if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+  db.query(
+    `DELETE FROM action_tokens WHERE user_id = ? AND type = 'delete_account'`,
+    [userId],
+    async (delErr) => {
+      if (delErr) {
+        console.error(delErr);
+        return res.status(500).json({ message: "Server error" });
+      }
+
+      const token = crypto.randomBytes(32).toString("hex");
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
+      db.query(
+        `INSERT INTO action_tokens (user_id, token, type, expires_at) VALUES (?, ?, 'delete_account', ?)`,
+        [userId, token, expiresAt],
+        async (insErr) => {
+          if (insErr) {
+            console.error(insErr);
+            return res.status(500).json({ message: "Server error" });
+          }
+
+          try {
+            const email = await getUserEmailById(userId);
+            const transporter = makeTransporter();
+
+            const confirmLink = `http://localhost:3000/confirm-delete-account?token=${token}`;
+
+            await transporter.sendMail({
+              from: process.env.EMAIL_USER,
+              to: email,
+              subject: "DuckTrack – Confirm account deletion",
+              html: `
+                <h2>Confirm account deletion</h2>
+                <p>This will permanently delete your DuckTrack account and all related data (applications, interviews, settings).</p>
+                <p>If you didn't request this, you can ignore this email.</p>
+                <p><a href="${confirmLink}">Yes, delete my account</a></p>
+              `,
+            });
+
+            return res.status(200).json({
+              message:
+                "We sent you an email with a confirmation link to delete your account.",
+            });
+          } catch (e) {
+            console.error("Mail error:", e);
+            return res.status(500).json({ message: "Failed to send email" });
+          }
+        }
+      );
+    }
+  );
+});
+
+app.get("/confirm-delete-account", (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).send("Missing token");
+
+  db.query(
+    `SELECT * FROM action_tokens WHERE token = ? AND type = 'delete_account' AND expires_at > NOW()`,
+    [token],
+    (tokErr, tokRows) => {
+      if (tokErr || tokRows.length === 0)
+        return res.status(400).send("Invalid or expired link");
+      const userId = tokRows[0].user_id;
+
+      db.beginTransaction((txErr) => {
+        if (txErr) {
+          console.error(txErr);
+          return res.status(500).send("Server error");
+        }
+
+        const deleteInterviews = `
+          DELETE i FROM interviews i
+          JOIN job_applications j ON i.application_id = j.application_id
+          WHERE j.users_user_id = ?`;
+        const deleteApplications = `DELETE FROM job_applications WHERE users_user_id = ?`;
+        const deleteTokens = `DELETE FROM action_tokens WHERE user_id = ?`;
+        const deleteUser = `DELETE FROM users WHERE user_id = ?`;
+
+        db.query(deleteInterviews, [userId], (e1) => {
+          if (e1) return rollback(e1, res);
+
+          db.query(deleteApplications, [userId], (e2) => {
+            if (e2) return rollback(e2, res);
+
+            db.query(deleteTokens, [userId], (e3) => {
+              if (e3) return rollback(e3, res);
+
+              db.query(deleteUser, [userId], (e4) => {
+                if (e4) return rollback(e4, res);
+
+                db.commit((commitErr) => {
+                  if (commitErr) return rollback(commitErr, res);
+
+                  db.query(
+                    `DELETE FROM action_tokens WHERE token = ?`,
+                    [token],
+                    () => {
+                      return res.redirect(
+                        "http://localhost:5173/account-deleted"
+                      );
+                    }
+                  );
+                });
+              });
+            });
+          });
+        });
+
+        function rollback(err, res) {
+          console.error("Delete account rollback:", err);
+          db.rollback(() => res.status(500).send("Failed to delete account"));
+        }
+      });
+    }
+  );
 });
 
 app.use((req, res, next) => {
