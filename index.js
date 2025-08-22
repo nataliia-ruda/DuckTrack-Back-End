@@ -97,8 +97,13 @@ function getUserEmailById(userId) {
 
 function makeTransporter() {
   return nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+    host: process.env.SMTP_HOST,
+    port: process.env.SMTP_PORT,
+    secure: true,
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
   });
 }
 
@@ -160,18 +165,12 @@ app.post("/signup", async function (req, res) {
                 return res.status(500).json({ message: "Token error" });
               }
 
-              const transporter = nodemailer.createTransport({
-                service: "gmail",
-                auth: {
-                  user: process.env.EMAIL_USER,
-                  pass: process.env.EMAIL_PASS,
-                },
-              });
+              const transporter = makeTransporter();
 
               const verifyLink = `http://localhost:5173/verify-email?token=${token}`;
 
               await transporter.sendMail({
-                from: process.env.EMAIL_USER,
+                from: process.env.EMAIL_FROM,
                 to: newUser.email,
                 subject: "Please confirm your email",
                 html: `
@@ -310,18 +309,12 @@ app.post("/resend-verification", (req, res) => {
             return res.status(500).json({ message: "Token generation failed" });
           }
 
-          const transporter = nodemailer.createTransport({
-            service: "gmail",
-            auth: {
-              user: process.env.EMAIL_USER,
-              pass: process.env.EMAIL_PASS,
-            },
-          });
+          const transporter = makeTransporter();
 
           const verifyLink = `http://localhost:5173/verify-email?token=${token}`;
 
           await transporter.sendMail({
-            from: process.env.EMAIL_USER,
+            from: process.env.EMAIL_FROM,
             to: email,
             subject: "Verify your email (resend)",
             html: `
@@ -395,18 +388,12 @@ app.post("/forgot-password", async (req, res) => {
             return res.status(500).json({ message: "Server error" });
           }
 
-          const transporter = nodemailer.createTransport({
-            service: "gmail",
-            auth: {
-              user: process.env.EMAIL_USER,
-              pass: process.env.EMAIL_PASS,
-            },
-          });
+          const transporter = makeTransporter();
 
           const resetLink = `http://localhost:5173/reset-password?token=${token}`;
 
           await transporter.sendMail({
-            from: process.env.EMAIL_USER,
+            from: process.env.EMAIL_FROM,
             to: email,
             subject: "DuckTrack - Password Reset",
             html: `
@@ -741,13 +728,7 @@ const sendInterviewReminders = () => {
       return;
     }
 
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
+    const transporter = makeTransporter();
 
     for (const row of results) {
       const formattedDate = new Date(row.interview_date).toLocaleString(
@@ -759,7 +740,7 @@ const sendInterviewReminders = () => {
       );
 
       const mailOptions = {
-        from: process.env.EMAIL_USER,
+        from: process.env.EMAIL_FROM,
         to: row.email,
         subject: "DuckTrack - Interview Reminder ",
         html: `
@@ -1035,7 +1016,7 @@ app.post("/request-delete-account", async (req, res) => {
             const confirmLink = `http://localhost:3000/confirm-delete-account?token=${token}`;
 
             await transporter.sendMail({
-              from: process.env.EMAIL_USER,
+              from: process.env.EMAIL_FROM,
               to: email,
               subject: "DuckTrack – Confirm account deletion",
               html: `
