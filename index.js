@@ -1,5 +1,5 @@
 import express from "express";
-import mysql from "mysql2/promise";
+import mysql from "mysql2";
 import cors from "cors";
 import bcrypt from "bcrypt";
 import session from "express-session";
@@ -52,17 +52,18 @@ app.use(
   })
 );
 
-const db = mysql
-  .createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-  })
-  .promise();
+const db = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 0,
+});
 
 const markGhostedApplications = () => {
   const sql = `
@@ -607,61 +608,72 @@ app.post("/interviews", (req, res) => {
   const { application_id, date, location, contact, notes, type } = req.body;
 
   if (!application_id || !date) {
-    return res
-      .status(400)
-      .json({ message: "Application ID and date are required." });
+    return res.status(400).json({ message: "Application ID and date are required." });
   }
 
-  db.beginTransaction((err) => {
+  db.getConnection((err, conn) => {
     if (err) {
-      console.error("TX begin error:", err);
+      console.error("Pool getConnection error:", err);
       return res.status(500).json({ message: "Server error" });
     }
 
-    const insertInterview = `
-      INSERT INTO interviews 
-        (application_id, interview_date, location, contact_person, notes, type, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
-    `;
+    conn.beginTransaction((txErr) => {
+      if (txErr) {
+        console.error("TX begin error:", txErr);
+        conn.release();
+        return res.status(500).json({ message: "Server error" });
+      }
 
-    db.query(
-      insertInterview,
-      [application_id, date, location, contact, notes, type || null],
-      (insErr, result) => {
-        if (insErr) {
-          console.error("Error saving interview:", insErr);
-          return db.rollback(() =>
-            res.status(500).json({ message: "Failed to save interview." })
-          );
-        }
+      const insertInterview = `
+        INSERT INTO interviews 
+          (application_id, interview_date, location, contact_person, notes, type, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
+      `;
 
-        const updateApplication = `
-          UPDATE job_applications
-          SET status = 'interviewing', updated_at = NOW()
-          WHERE application_id = ?
-            AND status NOT IN ('rejected','withdrawn','offer')
-        `;
-
-        db.query(updateApplication, [application_id], (updErr) => {
-          if (updErr) {
-            console.error("Error updating application status:", updErr);
-            return db.rollback(() =>
-              res.status(500).json({ message: "Failed to link interview." })
-            );
+      conn.query(
+        insertInterview,
+        [application_id, date, location, contact, notes, type || null],
+        (insErr) => {
+          if (insErr) {
+            console.error("Error saving interview:", insErr);
+            return conn.rollback(() => {
+              conn.release();
+              res.status(500).json({ message: "Failed to save interview." });
+            });
           }
 
-          db.commit((commitErr) => {
-            if (commitErr) {
-              console.error("TX commit error:", commitErr);
-              return db.rollback(() =>
-                res.status(500).json({ message: "Server error" })
-              );
+          const updateApplication = `
+            UPDATE job_applications
+            SET status = 'interviewing', updated_at = NOW()
+            WHERE application_id = ?
+              AND status NOT IN ('rejected','withdrawn','offer')
+          `;
+
+          conn.query(updateApplication, [application_id], (updErr) => {
+            if (updErr) {
+              console.error("Error updating application status:", updErr);
+              return conn.rollback(() => {
+                conn.release();
+                res.status(500).json({ message: "Failed to link interview." });
+              });
             }
-            res.status(201).json({ message: "Interview saved successfully!" });
+
+            conn.commit((commitErr) => {
+              if (commitErr) {
+                console.error("TX commit error:", commitErr);
+                return conn.rollback(() => {
+                  conn.release();
+                  res.status(500).json({ message: "Server error" });
+                });
+              }
+
+              conn.release();
+              res.status(201).json({ message: "Interview saved successfully!" });
+            });
           });
-        });
-      }
-    );
+        }
+      );
+    });
   });
 });
 
@@ -1061,56 +1073,61 @@ app.get("/confirm-delete-account", (req, res) => {
     `SELECT * FROM action_tokens WHERE token = ? AND type = 'delete_account' AND expires_at > NOW()`,
     [token],
     (tokErr, tokRows) => {
-      if (tokErr || tokRows.length === 0)
-        return res.status(400).send("Invalid or expired link");
+      if (tokErr || tokRows.length === 0) return res.status(400).send("Invalid or expired link");
       const userId = tokRows[0].user_id;
 
-      db.beginTransaction((txErr) => {
-        if (txErr) {
-          console.error(txErr);
+      db.getConnection((err, conn) => {
+        if (err) {
+          console.error(err);
           return res.status(500).send("Server error");
         }
 
-        const deleteInterviews = `
-          DELETE i FROM interviews i
-          JOIN job_applications j ON i.application_id = j.application_id
-          WHERE j.users_user_id = ?`;
-        const deleteApplications = `DELETE FROM job_applications WHERE users_user_id = ?`;
-        const deleteTokens = `DELETE FROM action_tokens WHERE user_id = ?`;
-        const deleteUser = `DELETE FROM users WHERE user_id = ?`;
+        conn.beginTransaction((txErr) => {
+          if (txErr) {
+            console.error(txErr);
+            conn.release();
+            return res.status(500).send("Server error");
+          }
 
-        db.query(deleteInterviews, [userId], (e1) => {
-          if (e1) return rollback(e1, res);
+          const deleteInterviews = `
+            DELETE i FROM interviews i
+            JOIN job_applications j ON i.application_id = j.application_id
+            WHERE j.users_user_id = ?`;
+          const deleteApplications = `DELETE FROM job_applications WHERE users_user_id = ?`;
+          const deleteTokens = `DELETE FROM action_tokens WHERE user_id = ?`;
+          const deleteUser = `DELETE FROM users WHERE user_id = ?`;
 
-          db.query(deleteApplications, [userId], (e2) => {
-            if (e2) return rollback(e2, res);
+          conn.query(deleteInterviews, [userId], (e1) => {
+            if (e1) return rollback(e1);
 
-            db.query(deleteTokens, [userId], (e3) => {
-              if (e3) return rollback(e3, res);
+            conn.query(deleteApplications, [userId], (e2) => {
+              if (e2) return rollback(e2);
 
-              db.query(deleteUser, [userId], (e4) => {
-                if (e4) return rollback(e4, res);
+              conn.query(deleteTokens, [userId], (e3) => {
+                if (e3) return rollback(e3);
 
-                db.commit((commitErr) => {
-                  if (commitErr) return rollback(commitErr, res);
+                conn.query(deleteUser, [userId], (e4) => {
+                  if (e4) return rollback(e4);
 
-                  db.query(
-                    `DELETE FROM action_tokens WHERE token = ?`,
-                    [token],
-                    () => {
-                      return res.redirect(`${FRONTEND_ORIGIN}/account-deleted`);
-                    }
-                  );
+                  conn.commit((commitErr) => {
+                    if (commitErr) return rollback(commitErr);
+
+                    conn.release();
+                    return res.redirect(`${FRONTEND_ORIGIN}/account-deleted`);
+                  });
                 });
               });
             });
           });
-        });
 
-        function rollback(err, res) {
-          console.error("Delete account rollback:", err);
-          db.rollback(() => res.status(500).send("Failed to delete account"));
-        }
+          function rollback(error) {
+            console.error("Delete account rollback:", error);
+            conn.rollback(() => {
+              conn.release();
+              res.status(500).send("Failed to delete account");
+            });
+          }
+        });
       });
     }
   );
