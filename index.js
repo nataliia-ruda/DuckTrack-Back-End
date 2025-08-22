@@ -17,12 +17,20 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 
 const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";
 
-app.use(
-  cors({
-    origin: FRONTEND_ORIGIN,
-    credentials: true,
-  })
-);
+const allowed = [
+  process.env.FRONTEND_ORIGIN,           
+  "http://localhost:5173",               
+];
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowed.includes(origin)) return cb(null, true);
+    cb(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+}));
+
+app.options("*", cors()); 
 
 app.use(express.json());
 
@@ -37,20 +45,18 @@ const sessionStore = new MySQLStore({
 
 app.set("trust proxy", 1);
 
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    store: sessionStore,
-    cookie: {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-      maxAge: 24 * 60 * 60 * 1000,
-    },
-  })
-);
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  store: sessionStore,
+  cookie: {
+    httpOnly: true,
+    secure: true,      
+    sameSite: "none",  
+    maxAge: 24 * 60 * 60 * 1000,
+  },
+}));
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
