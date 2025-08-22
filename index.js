@@ -13,9 +13,13 @@ const app = express();
 
 dotenv.config();
 
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+
+const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";
+
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: FRONTEND_ORIGIN,
     credentials: true,
   })
 );
@@ -31,6 +35,8 @@ const sessionStore = new MySQLStore({
   database: process.env.DB_NAME,
 });
 
+app.set("trust proxy", 1);
+
 app.use(
   session({
     secret: process.env.SESSION_SECRET,
@@ -39,7 +45,8 @@ app.use(
     store: sessionStore,
     cookie: {
       httpOnly: true,
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: 24 * 60 * 60 * 1000,
     },
   })
@@ -167,7 +174,7 @@ app.post("/signup", async function (req, res) {
 
               const transporter = makeTransporter();
 
-              const verifyLink = `http://localhost:5173/verify-email?token=${token}`;
+              const verifyLink = `${FRONTEND_ORIGIN}/verify-email?token=${token}`;
 
               await transporter.sendMail({
                 from: process.env.EMAIL_FROM,
@@ -311,7 +318,7 @@ app.post("/resend-verification", (req, res) => {
 
           const transporter = makeTransporter();
 
-          const verifyLink = `http://localhost:5173/verify-email?token=${token}`;
+          const verifyLink = `${FRONTEND_ORIGIN}/verify-email?token=${token}`;
 
           await transporter.sendMail({
             from: process.env.EMAIL_FROM,
@@ -390,7 +397,7 @@ app.post("/forgot-password", async (req, res) => {
 
           const transporter = makeTransporter();
 
-          const resetLink = `http://localhost:5173/reset-password?token=${token}`;
+          const resetLink = `${FRONTEND_ORIGIN}/reset-password?token=${token}`;
 
           await transporter.sendMail({
             from: process.env.EMAIL_FROM,
@@ -1013,7 +1020,7 @@ app.post("/request-delete-account", async (req, res) => {
             const email = await getUserEmailById(userId);
             const transporter = makeTransporter();
 
-            const confirmLink = `http://localhost:3000/confirm-delete-account?token=${token}`;
+            const confirmLink = `${BASE_URL}/confirm-delete-account?token=${token}`;
 
             await transporter.sendMail({
               from: process.env.EMAIL_FROM,
@@ -1086,9 +1093,7 @@ app.get("/confirm-delete-account", (req, res) => {
                     `DELETE FROM action_tokens WHERE token = ?`,
                     [token],
                     () => {
-                      return res.redirect(
-                        "http://localhost:5173/account-deleted"
-                      );
+                      return res.redirect(`${FRONTEND_ORIGIN}/account-deleted`);
                     }
                   );
                 });
@@ -1110,6 +1115,7 @@ app.use((req, res, next) => {
   res.status(404).send("Wrong route!");
 });
 
-app.listen(3000, () => {
-  console.log(`Listening on http://localhost:3000`);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Listening on port ${PORT}`);
 });
