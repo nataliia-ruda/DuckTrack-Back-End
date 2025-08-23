@@ -21,7 +21,7 @@ app.use(
   cors({
     origin: FRONTEND_ORIGIN,
     credentials: true,
-    exposedHeaders: ["set-cookie"],
+    
   })
 );
 
@@ -49,7 +49,7 @@ app.use(
       secure: true, 
       sameSite: "none", 
       maxAge: 24 * 60 * 60 * 1000,
-      domain: process.env.NODE_ENV === "production" ? "ducktrack.de" : undefined, 
+  
     },
   })
 );
