@@ -14,29 +14,43 @@ const app = express();
 dotenv.config();
 
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
-
 const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";
+
+const allowedOrigins = Array.from(
+  new Set([
+    "http://localhost:5173",
+    "https://ducktrack.de",
+    "https://www.ducktrack.de",
+    FRONTEND_ORIGIN,
+  ])
+).filter(Boolean);
+
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+
+app.options("*", cors(corsOptions));
 
 app.use(express.json());
 
-const MySQLStore = MySQLStoreFactory(session);
+app.set("trust proxy", 1);
 
+const MySQLStore = MySQLStoreFactory(session);
 const sessionStore = new MySQLStore({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
 });
-
-sessionStore.on("error", (error) => {
-  console.error("Session store error:", error);
-});
-
-sessionStore.on("connect", () => {
-  console.log("Session store connected successfully");
-});
-
-app.set("trust proxy", 1);
+sessionStore.on("error", (err) => console.error("Session store error:", err));
+sessionStore.on("connect", () => console.log("Session store connected"));
 
 app.use(
   session({
@@ -50,25 +64,7 @@ app.use(
       sameSite: "none",
       maxAge: 24 * 60 * 60 * 1000,
     },
-  })
-);
-
-app.use((req, res, next) => {
-  console.log("=== REQUEST DEBUG ===");
-  console.log("Path:", req.path);
-  console.log("Session ID:", req.sessionID);
-  console.log("Session exists:", !!req.session);
-  console.log("Session user:", req.session?.user);
-  console.log("Has cookies:", !!req.headers.cookie);
-  console.log("User-Agent:", req.headers["user-agent"]);
-  console.log("=====================");
-  next();
-});
-
-app.use(
-  cors({
-    origin: FRONTEND_ORIGIN,
-    credentials: true,
+    name: "connect.sid",
   })
 );
 
