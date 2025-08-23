@@ -13,34 +13,30 @@ const app = express();
 
 dotenv.config();
 
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
-const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173"; 
+const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";           
 
-const allowedOrigins = Array.from(
-  new Set([
-    "http://localhost:5173",
-    "https://ducktrack.de",
-    "https://www.ducktrack.de",
-    FRONTEND_ORIGIN,
-  ])
-).filter(Boolean);
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://ducktrack.de",
+  "https://www.ducktrack.de",
+  "https://api.ducktrack.de",   
+].filter(Boolean);
 
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
+    if (!origin) return cb(null, true);  
     if (allowedOrigins.includes(origin)) return cb(null, true);
-    return cb(new Error("Not allowed by CORS"));
+    cb(new Error("Not allowed by CORS"));
   },
   credentials: true,
-};
+};   
+
 
 app.use(cors(corsOptions));
-
 app.options("*", cors(corsOptions));
-
 app.use(express.json());
-
-app.set("trust proxy", 1);
+app.set("trust proxy", 1); 
 
 const MySQLStore = MySQLStoreFactory(session);
 const sessionStore = new MySQLStore({
@@ -52,21 +48,23 @@ const sessionStore = new MySQLStore({
 sessionStore.on("error", (err) => console.error("Session store error:", err));
 sessionStore.on("connect", () => console.log("Session store connected"));
 
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    store: sessionStore,
-    cookie: {
-      httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      maxAge: 24 * 60 * 60 * 1000,
-    },
-    name: "connect.sid",
-  })
-);
+const isProd = process.env.NODE_ENV === "production";
+const apiHost = process.env.API_HOST || ""; 
+const isSameSite = apiHost.endsWith("ducktrack.de"); 
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  store: sessionStore,
+  name: "connect.sid",
+  cookie: {
+    httpOnly: true,
+    secure: isProd,                          
+    sameSite: isSameSite ? "lax" : "none",   
+    ...(isSameSite ? { domain: ".ducktrack.de" } : {}), 
+    maxAge: 24 * 60 * 60 * 1000,
+  },
+}));
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
@@ -251,43 +249,25 @@ app.post("/verify-email", (req, res) => {
 
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ message: "Email and password are required" });
 
-  if (!email || !password) {
-    return res.status(400).json({ message: "Email and password are required" });
-  }
+  db.query(`SELECT * FROM users WHERE email = ?`, [email], async (error, result) => {
+    if (error) return res.status(500).json({ message: "Internal server error" });
+    if (result.length === 0) return res.status(401).json({ found: false, message: "Wrong credentials!" });
 
-  db.query(
-    `SELECT * FROM users WHERE email = ?`,
-    [email],
-    async (error, result) => {
-      if (error) {
-        console.error("Database query error:", error);
-        return res.status(500).json({ message: "Internal server error" });
-      }
+    const user = result[0];
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(401).json({ found: false, message: "Wrong credentials!" });
+    if (!user.is_verified) {
+      return res.status(403).json({
+        verified: false, user_id: user.user_id, email: user.email,
+        message: "Please verify your email before continuing.",
+      });
+    }
 
-      if (result.length === 0) {
-        return res
-          .status(401)
-          .json({ found: false, message: "Wrong credentials!" });
-      }
-
-      const user = result[0];
-      const match = await bcrypt.compare(password, user.password);
-
-      if (!match) {
-        return res
-          .status(401)
-          .json({ found: false, message: "Wrong credentials!" });
-      }
-
-      if (!user.is_verified) {
-        return res.status(403).json({
-          verified: false,
-          user_id: user.user_id,
-          email: user.email,
-          message: "Please verify your email before continuing.",
-        });
-      }
+  
+    req.session.regenerate((err) => {
+      if (err) return res.status(500).json({ message: "Session error" });
 
       req.session.user = {
         user_id: user.user_id,
@@ -296,12 +276,13 @@ app.post("/login", async (req, res) => {
         gender: user.gender,
       };
 
-      res.status(200).json({
-        message: "Logged in",
-        user: req.session.user,
+    
+      req.session.save((err2) => {
+        if (err2) return res.status(500).json({ message: "Session save error" });
+        res.status(200).json({ message: "Logged in", user: req.session.user });
       });
-    }
-  );
+    });
+  });
 });
 
 app.post("/resend-verification", (req, res) => {
