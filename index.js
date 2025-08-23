@@ -21,6 +21,7 @@ app.use(
   cors({
     origin: FRONTEND_ORIGIN,
     credentials: true,
+    exposedHeaders: ["set-cookie"],
   })
 );
 
@@ -45,9 +46,10 @@ app.use(
     store: sessionStore,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      secure: true, 
+      sameSite: "none", 
       maxAge: 24 * 60 * 60 * 1000,
+      domain: process.env.NODE_ENV === "production" ? "ducktrack.de" : undefined, 
     },
   })
 );
@@ -60,7 +62,7 @@ const db = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  
+
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
 });
@@ -608,7 +610,9 @@ app.post("/interviews", (req, res) => {
   const { application_id, date, location, contact, notes, type } = req.body;
 
   if (!application_id || !date) {
-    return res.status(400).json({ message: "Application ID and date are required." });
+    return res
+      .status(400)
+      .json({ message: "Application ID and date are required." });
   }
 
   db.getConnection((err, conn) => {
@@ -668,7 +672,9 @@ app.post("/interviews", (req, res) => {
               }
 
               conn.release();
-              res.status(201).json({ message: "Interview saved successfully!" });
+              res
+                .status(201)
+                .json({ message: "Interview saved successfully!" });
             });
           });
         }
@@ -1073,7 +1079,8 @@ app.get("/confirm-delete-account", (req, res) => {
     `SELECT * FROM action_tokens WHERE token = ? AND type = 'delete_account' AND expires_at > NOW()`,
     [token],
     (tokErr, tokRows) => {
-      if (tokErr || tokRows.length === 0) return res.status(400).send("Invalid or expired link");
+      if (tokErr || tokRows.length === 0)
+        return res.status(400).send("Invalid or expired link");
       const userId = tokRows[0].user_id;
 
       db.getConnection((err, conn) => {
