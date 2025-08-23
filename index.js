@@ -17,26 +17,14 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 
 const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";
 
-const allowed = [
-  process.env.FRONTEND_ORIGIN,
-  "https://ducktrack.de",
-  "https://www.ducktrack.de",
-  "http://localhost:5173",
-].filter(Boolean);
+app.use(
+  cors({
+    origin: FRONTEND_ORIGIN,
+    credentials: true,
+  })
+);
 
-const corsOptions = {
-  origin: (origin, cb) => {
-    if (!origin || allowed.includes(origin)) return cb(null, true);
-    cb(new Error("Not allowed by CORS"));
-  },
-  credentials: true,
-  methods: ["GET","POST","PATCH","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-};
-
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); 
-
+app.use(express.json());
 
 const MySQLStore = MySQLStoreFactory(session);
 
@@ -49,22 +37,20 @@ const sessionStore = new MySQLStore({
 
 app.set("trust proxy", 1);
 
-const isProd = process.env.NODE_ENV === "production";
-
-app.use(session({
-  secret: process.env.SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  store: sessionStore,
-  cookie: {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: isProd ? "none" : "lax",
-    domain: isProd ? ".ducktrack.de" : undefined, 
-    maxAge: 24*60*60*1000,
-  },
-}));
-
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    store: sessionStore,
+    cookie: {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      maxAge: 24 * 60 * 60 * 1000,
+    },
+  })
+);
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
