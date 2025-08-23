@@ -18,36 +18,25 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";
 
 const allowed = [
-  process.env.FRONTEND_ORIGIN,           
-  "http://localhost:5173",               
-];
+  process.env.FRONTEND_ORIGIN,
+  "https://ducktrack.de",
+  "https://www.ducktrack.de",
+  "http://localhost:5173",
+].filter(Boolean);
 
-app.use(cors({
+const corsOptions = {
   origin: (origin, cb) => {
-   
-    if (!origin) return cb(null, true);
-    
-    if (allowedOrigins.includes(origin)) {
-      return cb(null, true);
-    }
-    
-  
-    const originDomain = new URL(origin).hostname;
-    const allowedDomains = allowedOrigins.map(url => new URL(url).hostname);
-    
-    if (allowedDomains.some(domain => originDomain.endsWith(domain))) {
-      return cb(null, true);
-    }
-    
+    if (!origin || allowed.includes(origin)) return cb(null, true);
     cb(new Error("Not allowed by CORS"));
   },
   credentials: true,
-  exposedHeaders: ['set-cookie'] 
-}));
+  methods: ["GET","POST","PATCH","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
 
-app.options("*", cors()); 
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); 
 
-app.use(express.json());
 
 const MySQLStore = MySQLStoreFactory(session);
 
@@ -60,6 +49,8 @@ const sessionStore = new MySQLStore({
 
 app.set("trust proxy", 1);
 
+const isProd = process.env.NODE_ENV === "production";
+
 app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: false,
@@ -67,12 +58,13 @@ app.use(session({
   store: sessionStore,
   cookie: {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production', 
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', 
-    maxAge: 24 * 60 * 60 * 1000,
-    domain: process.env.NODE_ENV === 'production' ? '.yourdomain.com' : undefined 
+    secure: isProd,
+    sameSite: isProd ? "none" : "lax",
+    domain: isProd ? ".ducktrack.de" : undefined, 
+    maxAge: 24*60*60*1000,
   },
 }));
+
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
