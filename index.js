@@ -24,10 +24,25 @@ const allowed = [
 
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || allowed.includes(origin)) return cb(null, true);
+   
+    if (!origin) return cb(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
+    
+  
+    const originDomain = new URL(origin).hostname;
+    const allowedDomains = allowedOrigins.map(url => new URL(url).hostname);
+    
+    if (allowedDomains.some(domain => originDomain.endsWith(domain))) {
+      return cb(null, true);
+    }
+    
     cb(new Error("Not allowed by CORS"));
   },
   credentials: true,
+  exposedHeaders: ['set-cookie'] 
 }));
 
 app.options("*", cors()); 
@@ -52,9 +67,10 @@ app.use(session({
   store: sessionStore,
   cookie: {
     httpOnly: true,
-    secure: true,      
-    sameSite: "none",  
+    secure: process.env.NODE_ENV === 'production', 
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', 
     maxAge: 24 * 60 * 60 * 1000,
+    domain: process.env.NODE_ENV === 'production' ? '.yourdomain.com' : undefined 
   },
 }));
 
