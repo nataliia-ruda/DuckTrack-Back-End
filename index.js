@@ -17,14 +17,6 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 
 const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";
 
-app.use(
-  cors({
-    origin: FRONTEND_ORIGIN,
-    credentials: true,
-    
-  })
-);
-
 app.use(express.json());
 
 const MySQLStore = MySQLStoreFactory(session);
@@ -34,6 +26,14 @@ const sessionStore = new MySQLStore({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+});
+
+sessionStore.on("error", (error) => {
+  console.error("Session store error:", error);
+});
+
+sessionStore.on("connect", () => {
+  console.log("Session store connected successfully");
 });
 
 app.set("trust proxy", 1);
@@ -46,11 +46,29 @@ app.use(
     store: sessionStore,
     cookie: {
       httpOnly: true,
-      secure: true, 
-      sameSite: "none", 
+      secure: true,
+      sameSite: "none",
       maxAge: 24 * 60 * 60 * 1000,
-  
     },
+  })
+);
+
+app.use((req, res, next) => {
+  console.log("=== REQUEST DEBUG ===");
+  console.log("Path:", req.path);
+  console.log("Session ID:", req.sessionID);
+  console.log("Session exists:", !!req.session);
+  console.log("Session user:", req.session?.user);
+  console.log("Has cookies:", !!req.headers.cookie);
+  console.log("User-Agent:", req.headers["user-agent"]);
+  console.log("=====================");
+  next();
+});
+
+app.use(
+  cors({
+    origin: FRONTEND_ORIGIN,
+    credentials: true,
   })
 );
 
