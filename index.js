@@ -1,5 +1,5 @@
 import express from "express";
-import mysql from "mysql2/promise";
+import mysql from "mysql2"
 import cors from "cors";
 import bcrypt from "bcrypt";
 import session from "express-session";
@@ -52,12 +52,10 @@ const db = mysql.createPool({
   keepAliveInitialDelay: 10000,   
 });
 
-setInterval(async () => {
-  try {
-    await db.query("SELECT 1");
-  } catch (err) {
-    console.error("[DB_KEEPALIVE_ERROR]", err?.code || err);
-  }
+setInterval(() => {
+db.query("SELECT 1", (err) => {
+if (err) console.error("[DB_KEEPALIVE_ERROR]", err?.code || err);
+});
 }, 45000);
 
 const MySQLStore = MySQLStoreFactory(session);
