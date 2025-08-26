@@ -38,6 +38,28 @@ app.options("*", cors(corsOptions));
 app.use(express.json());
 app.set("trust proxy", 1); 
 
+const db = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: Number(process.env.DB_PORT || 3306),
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  connectTimeout: 10000,          
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,   
+});
+
+setInterval(async () => {
+  try {
+    await db.query("SELECT 1");
+  } catch (err) {
+    console.error("[DB_KEEPALIVE_ERROR]", err?.code || err);
+  }
+}, 45000);
+
 const MySQLStore = MySQLStoreFactory(session);
 const sessionStore = new MySQLStore(
   {
@@ -71,28 +93,6 @@ app.use(session({
     maxAge: 24 * 60 * 60 * 1000,
   },
 }));
-
-const db = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: Number(process.env.DB_PORT || 3306),
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  connectTimeout: 10000,          
-  enableKeepAlive: true,
-  keepAliveInitialDelay: 10000,   
-});
-
-setInterval(async () => {
-  try {
-    await db.query("SELECT 1");
-  } catch (err) {
-    console.error("[DB_KEEPALIVE_ERROR]", err?.code || err);
-  }
-}, 45000);
 
 
 const markGhostedApplications = () => {
