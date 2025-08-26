@@ -1,5 +1,5 @@
 import express from "express";
-import mysql from "mysql2";
+import mysql from "mysql2/promise";
 import cors from "cors";
 import bcrypt from "bcrypt";
 import session from "express-session";
@@ -39,12 +39,18 @@ app.use(express.json());
 app.set("trust proxy", 1); 
 
 const MySQLStore = MySQLStoreFactory(session);
-const sessionStore = new MySQLStore({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-});
+const sessionStore = new MySQLStore(
+  {
+    clearExpired: true,
+    checkExpirationInterval: 15 * 60 * 1000, 
+    expiration: 24 * 60 * 60 * 1000,         
+    endConnectionOnClose: false,             
+    createDatabaseTable: false,              
+    schema: { tableName: "sessions" },
+  },
+  db 
+);
+
 sessionStore.on("error", (err) => console.error("Session store error:", err));
 sessionStore.on("connect", () => console.log("Session store connected"));
 
@@ -71,13 +77,23 @@ const db = mysql.createPool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  port: Number(process.env.DB_PORT || 3306),
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-
+  connectTimeout: 10000,          
   enableKeepAlive: true,
-  keepAliveInitialDelay: 0,
+  keepAliveInitialDelay: 10000,   
 });
+
+setInterval(async () => {
+  try {
+    await db.query("SELECT 1");
+  } catch (err) {
+    console.error("[DB_KEEPALIVE_ERROR]", err?.code || err);
+  }
+}, 45000);
+
 
 const markGhostedApplications = () => {
   const sql = `
