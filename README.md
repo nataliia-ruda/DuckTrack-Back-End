@@ -24,13 +24,13 @@ Frontend repository: https://github.com/nataliia-ruda/DuckTrack-Front-End
 ## Technologies
 
 - Node.js + Express (REST API)
-- MySQL (mysql2) — data storage
-- express-session + express-mysql-session — session-based authentication
-- bcrypt — password hashing
-- nodemailer — transactional emails (verification, password reset, account deletion)
-- node-cron — scheduled background jobs
-- dotenv — environment configuration
-- cors — cross-origin request handling
+- MySQL (mysql2) - data storage
+- express-session + express-mysql-session - session-based authentication
+- bcrypt - password hashing
+- nodemailer - transactional emails (verification, password reset, account deletion)
+- node-cron - scheduled background jobs
+- dotenv - environment configuration
+- cors - cross-origin request handling
 
 ## Getting Started
 
