@@ -62,8 +62,8 @@ const MySQLStore = MySQLStoreFactory(session);
 const sessionStore = new MySQLStore(
   {
     clearExpired: true,
-    checkExpirationInterval: 15 * 60 * 1000, 
-    expiration: 24 * 60 * 60 * 1000,         
+    checkExpirationInterval: 15 * 60 * 1000,
+    expiration: 14 * 24 * 60 * 60 * 1000,
     endConnectionOnClose: false,             
     createDatabaseTable: false,              
     schema: { tableName: "sessions" },
@@ -88,7 +88,7 @@ app.use(session({
     secure: isProd,                          
     sameSite: isSameSite ? "lax" : "none",   
     ...(isSameSite ? { domain: ".ducktrack.de" } : {}), 
-    maxAge: 24 * 60 * 60 * 1000,
+    maxAge: 14 * 24 * 60 * 60 * 1000,
   },
 }));
 
