@@ -92,13 +92,19 @@ app.use(session({
   name: "connect.sid",
   cookie: {
     httpOnly: true,
-    secure: isProd,                          
-    sameSite: isSameSite ? "lax" : "none",   
-    ...(isSameSite ? { domain: ".ducktrack.de" } : {}), 
+    secure: isProd,
+    sameSite: !isProd ? "lax" : isSameSite ? "lax" : "none",
+    ...(isProd && isSameSite ? { domain: ".ducktrack.de" } : {}),
     maxAge: 14 * 24 * 60 * 60 * 1000,
   },
 }));
 
+function requireAuth(req, res, next) {
+  if (!req.session?.user?.user_id) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+  next();
+}
 
 const markGhostedApplications = () => {
   const sql = `
@@ -501,11 +507,11 @@ app.post("/logout", (req, res) => {
   });
 });
 
-app.post("/new-application", function (req, res) {
+app.post("/new-application", requireAuth, function (req, res) {
   let newApplication = req.body;
 
   db.query(
-    `INSERT INTO job_applications (position_name, employer_name, application_date, employment_type, source, job_description, job_link, users_user_id, work_mode, status, notes) 
+    `INSERT INTO job_applications (position_name, employer_name, application_date, employment_type, source, job_description, job_link, users_user_id, work_mode, status, notes)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       newApplication.position_name,
@@ -515,7 +521,7 @@ app.post("/new-application", function (req, res) {
       newApplication.source,
       newApplication.job_description,
       newApplication.job_link,
-      newApplication.user_id,
+      req.session.user.user_id,
       newApplication.work_mode,
       newApplication.status,
       newApplication.notes,
@@ -539,16 +545,12 @@ app.post("/new-application", function (req, res) {
   );
 });
 
-app.get("/my-applications", (req, res) => {
-  const user_id = req.query.user_id;
+app.get("/my-applications", requireAuth, (req, res) => {
+  const user_id = req.session.user.user_id;
   const search = req.query.search;
   const sort = req.query.sort || "created_at";
   const order = req.query.order === "asc" ? "ASC" : "DESC";
   const status = req.query.status;
-
-  if (!user_id) {
-    return res.status(400).json({ message: "User ID is required" });
-  }
 
   let query = `SELECT * FROM job_applications WHERE users_user_id = ?`;
   const params = [user_id];
@@ -580,12 +582,12 @@ app.get("/my-applications", (req, res) => {
   });
 });
 
-app.get("/my-applications/:id", function (req, res) {
+app.get("/my-applications/:id", requireAuth, function (req, res) {
   let applicationId = Number(req.params.id);
 
   db.query(
-    `SELECT * FROM job_applications WHERE application_id = ?`,
-    [applicationId],
+    `SELECT * FROM job_applications WHERE application_id = ? AND users_user_id = ?`,
+    [applicationId, req.session.user.user_id],
     (error, results) => {
       if (error) {
         console.error("Error fetching application:", error);
@@ -601,28 +603,32 @@ app.get("/my-applications/:id", function (req, res) {
   );
 });
 
-app.patch("/interviews/:id", (req, res) => {
+app.patch("/interviews/:id", requireAuth, (req, res) => {
   const { id } = req.params;
   const { interview_date, location, contact_person, notes, type } = req.body;
 
   const sql = `
-    UPDATE interviews
-    SET interview_date = ?, location = ?, contact_person = ?, notes = ?, type = ?, updated_at = NOW()
-    WHERE interview_id = ?
+    UPDATE interviews i
+    JOIN job_applications j ON i.application_id = j.application_id
+    SET i.interview_date = ?, i.location = ?, i.contact_person = ?, i.notes = ?, i.type = ?, i.updated_at = NOW()
+    WHERE i.interview_id = ? AND j.users_user_id = ?
   `;
 
   db.query(
     sql,
-    [interview_date, location, contact_person, notes, type || null, id],
+    [interview_date, location, contact_person, notes, type || null, id, req.session.user.user_id],
     (err, result) => {
       if (err)
         return res.status(500).json({ message: "Failed to update interview" });
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ message: "Interview not found" });
+      }
       res.status(200).json({ message: "Interview updated!" });
     }
   );
 });
 
-app.post("/interviews", (req, res) => {
+app.post("/interviews", requireAuth, (req, res) => {
   const { application_id, date, location, contact, notes, type } = req.body;
 
   if (!application_id || !date) {
@@ -644,57 +650,74 @@ app.post("/interviews", (req, res) => {
         return res.status(500).json({ message: "Server error" });
       }
 
-      const insertInterview = `
-        INSERT INTO interviews 
-          (application_id, interview_date, location, contact_person, notes, type, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
-      `;
-
       conn.query(
-        insertInterview,
-        [application_id, date, location, contact, notes, type || null],
-        (insErr) => {
-          if (insErr) {
-            console.error("Error saving interview:", insErr);
+        `SELECT application_id FROM job_applications WHERE application_id = ? AND users_user_id = ?`,
+        [application_id, req.session.user.user_id],
+        (ownErr, ownRows) => {
+          if (ownErr || ownRows.length === 0) {
             return conn.rollback(() => {
               conn.release();
-              res.status(500).json({ message: "Failed to save interview." });
+              res.status(404).json({ message: "Application not found." });
             });
           }
 
-          const updateApplication = `
-            UPDATE job_applications
-            SET status = 'interviewing', updated_at = NOW()
-            WHERE application_id = ?
-              AND status NOT IN ('rejected','withdrawn','offer')
-          `;
+          insertInterviewTx();
+        }
+      );
 
-          conn.query(updateApplication, [application_id], (updErr) => {
-            if (updErr) {
-              console.error("Error updating application status:", updErr);
+      const insertInterviewTx = () => {
+        const insertInterview = `
+          INSERT INTO interviews
+            (application_id, interview_date, location, contact_person, notes, type, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
+        `;
+
+        conn.query(
+          insertInterview,
+          [application_id, date, location, contact, notes, type || null],
+          (insErr) => {
+            if (insErr) {
+              console.error("Error saving interview:", insErr);
               return conn.rollback(() => {
                 conn.release();
-                res.status(500).json({ message: "Failed to link interview." });
+                res.status(500).json({ message: "Failed to save interview." });
               });
             }
 
-            conn.commit((commitErr) => {
-              if (commitErr) {
-                console.error("TX commit error:", commitErr);
+            const updateApplication = `
+              UPDATE job_applications
+              SET status = 'interviewing', updated_at = NOW()
+              WHERE application_id = ?
+                AND status NOT IN ('rejected','withdrawn','offer')
+            `;
+
+            conn.query(updateApplication, [application_id], (updErr) => {
+              if (updErr) {
+                console.error("Error updating application status:", updErr);
                 return conn.rollback(() => {
                   conn.release();
-                  res.status(500).json({ message: "Server error" });
+                  res.status(500).json({ message: "Failed to link interview." });
                 });
               }
 
-              conn.release();
-              res
-                .status(201)
-                .json({ message: "Interview saved successfully!" });
+              conn.commit((commitErr) => {
+                if (commitErr) {
+                  console.error("TX commit error:", commitErr);
+                  return conn.rollback(() => {
+                    conn.release();
+                    res.status(500).json({ message: "Server error" });
+                  });
+                }
+
+                conn.release();
+                res
+                  .status(201)
+                  .json({ message: "Interview saved successfully!" });
+              });
             });
-          });
-        }
-      );
+          }
+        );
+      };
     });
   });
 });
@@ -724,12 +747,21 @@ app.get("/interviews", (req, res) => {
   });
 });
 
-app.delete("/interviews/:id", (req, res) => {
+app.delete("/interviews/:id", requireAuth, (req, res) => {
   const { id } = req.params;
-  db.query(`DELETE FROM interviews WHERE interview_id = ?`, [id], (err) => {
-    if (err) return res.status(500).json({ message: "Delete failed" });
-    res.status(200).json({ message: "Interview deleted" });
-  });
+  db.query(
+    `DELETE i FROM interviews i
+     JOIN job_applications j ON i.application_id = j.application_id
+     WHERE i.interview_id = ? AND j.users_user_id = ?`,
+    [id, req.session.user.user_id],
+    (err, result) => {
+      if (err) return res.status(500).json({ message: "Delete failed" });
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ message: "Interview not found" });
+      }
+      res.status(200).json({ message: "Interview deleted" });
+    }
+  );
 });
 
 app.get("/my-employers", (req, res) => {
@@ -851,8 +883,12 @@ cron.schedule(
   }
 );
 
-app.get("/get-user/:id", (req, res) => {
+app.get("/get-user/:id", requireAuth, (req, res) => {
   const userId = req.params.id;
+
+  if (Number(userId) !== Number(req.session.user.user_id)) {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
   db.query(
     `SELECT user_first_name, user_last_name, email, gender, auto_ghost_enabled FROM users WHERE user_id = ?`,
@@ -872,9 +908,8 @@ app.get("/get-user/:id", (req, res) => {
   );
 });
 
-app.patch("/update-profile", async (req, res) => {
+app.patch("/update-profile", requireAuth, async (req, res) => {
   const {
-    user_id,
     firstName,
     lastName,
     gender,
@@ -882,6 +917,7 @@ app.patch("/update-profile", async (req, res) => {
     currentPassword,
     newPassword,
   } = req.body;
+  const user_id = req.session.user.user_id;
 
   try {
     db.query(
@@ -956,7 +992,7 @@ app.patch("/update-profile", async (req, res) => {
   }
 });
 
-app.patch("/my-applications/:id", (req, res) => {
+app.patch("/my-applications/:id", requireAuth, (req, res) => {
   const applicationId = Number(req.params.id);
   const {
     position_name,
@@ -983,9 +1019,9 @@ app.patch("/my-applications/:id", (req, res) => {
       job_link = ?, 
       work_mode = ?, 
       status = ?, 
-      notes = ?, 
+      notes = ?,
       updated_at = NOW()
-    WHERE application_id = ?
+    WHERE application_id = ? AND users_user_id = ?
   `;
 
   db.query(
@@ -1002,6 +1038,7 @@ app.patch("/my-applications/:id", (req, res) => {
       status,
       notes,
       applicationId,
+      req.session.user.user_id,
     ],
     (error, result) => {
       if (error) {
@@ -1011,21 +1048,32 @@ app.patch("/my-applications/:id", (req, res) => {
           .json({ message: "Failed to update application" });
       }
 
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
       res.status(200).json({ message: "Application updated successfully!" });
     }
   );
 });
 
-app.delete("/my-applications/:id", function (req, res) {
+app.delete("/my-applications/:id", requireAuth, function (req, res) {
   let applicationId = Number(req.params.id);
 
-  if (typeof applicationId !== "number") {
+  if (typeof applicationId !== "number" || Number.isNaN(applicationId)) {
     res.status(404).json({ message: "Inexistent application" });
   } else {
     db.query(
-      `DELETE FROM job_applications WHERE application_id = ?`,
-      [applicationId],
-      (error, result, fields) => {
+      `DELETE FROM job_applications WHERE application_id = ? AND users_user_id = ?`,
+      [applicationId, req.session.user.user_id],
+      (error, result) => {
+        if (error) {
+          console.error("Error deleting application:", error);
+          return res.status(500).json({ message: "Failed to delete application" });
+        }
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ message: "Application not found" });
+        }
         res.status(200).json({ message: "Application deleted" });
       }
     );
