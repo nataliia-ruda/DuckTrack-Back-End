@@ -13,6 +13,13 @@ const app = express();
 
 dotenv.config();
 
+process.on("unhandledRejection", (err) => {
+  console.error("[UNHANDLED_REJECTION]", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT_EXCEPTION]", err);
+});
+
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173"; 
 const BASE_URL = process.env.BACKEND_URL || "http://localhost:3000";           
 
@@ -834,7 +841,9 @@ cron.schedule(
   "0 * * * *", // hourly
   () => {
     console.log("Cleaning up expired tokens...");
-    db.query(`DELETE FROM action_tokens WHERE expires_at <= NOW()`);
+    db.query(`DELETE FROM action_tokens WHERE expires_at <= NOW()`, (err) => {
+      if (err) console.error("[TOKEN_CLEANUP_ERROR]", err?.code || err);
+    });
   },
   {
     scheduled: true,
